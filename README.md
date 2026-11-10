@@ -32,8 +32,8 @@ UI를 다시 실행하면 위 기본값으로 시작합니다. 설정을 편집�
 ## 1. 다른 컴퓨터에서 내려받기
 
 ```bash
-git clone https://github.com/sy00107/lift-controller.git
-cd lift-controller
+git clone https://github.com/sy00107/lift_ctrl.git
+cd lift_ctrl
 ```
 
 비공개 저장소는 GitHub 인증이 필요합니다. 이후 같은 컴퓨터에서는 `git pull --ff-only`로 갱신합니다.
@@ -47,8 +47,8 @@ cd lift-controller
 ```bash
 sudo apt update
 sudo apt install -y git python3-tk python3-venv
-git clone https://github.com/sy00107/lift-controller.git
-cd lift-controller
+git clone https://github.com/sy00107/lift_ctrl.git
+cd lift_ctrl
 bash scripts/install_pi.sh
 ```
 
@@ -161,7 +161,7 @@ GUI 테스트에는 디스플레이가 필요합니다. 헤드리스 Linux에서
 ## 업데이트
 
 ```bash
-cd ~/lift-controller
+cd ~/lift_ctrl
 git pull --ff-only
 bash scripts/install_pi.sh
 # 펌웨어 변경도 있다면 모터 전원 OFF 후 위 Pico 업로드 절차를 별도로 실행
