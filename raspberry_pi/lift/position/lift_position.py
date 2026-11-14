@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local Tk control for pico_lift_position, manual zero and 0..630 mm targets."""
+"""Local Tk control for pico_lift_position, manual zero and 0..690 mm targets."""
 import argparse
 import glob
 from collections import deque
@@ -15,8 +15,8 @@ from tkinter import ttk, messagebox
 from lift_joystick import Joystick
 
 PROTOCOL = "yor-lift-position-v1"
-STROKE_MM = 630.0
-WORK_MIN_MM, WORK_MAX_MM = 10.0, 620.0
+STROKE_MM = 690.0
+WORK_MIN_MM, WORK_MAX_MM = 10.0, 680.0
 DEFAULT_KP, DEFAULT_KD = 0.04, 0.001
 DEFAULT_PWM = 100
 EVENTS = {
@@ -30,7 +30,7 @@ EVENTS = {
     "target_reached": "목표 도달 · 정착 확인",
     "position_drift": "도착 후 위치 이탈 · 하중/브레이크 확인 후 오류를 해제하세요",
     "motion_no_progress": "실제 진행 없음 · 걸림/엔코더 확인 · 원점 재등록 필요",
-    "target_near_endpoint": "끝단 여유 구간입니다. 자동 이동 목표는 10–620 mm로 입력하세요",
+    "target_near_endpoint": "끝단 여유 구간입니다. 자동 이동 목표는 10–680 mm로 입력하세요",
     "target_encoder_resolution": "엔코더 해상도로 이 목표를 0.2 mm 이내에 맞출 수 없어요",
     "jog_reverse_requires_stop": "방향 전환 전 정지하세요 · 오류 해제 후 다시 조작하세요",
     "control_save_requires_stationary": "멈춘 뒤 잠시 기다렸다가 설정 저장을 다시 누르세요",
@@ -61,14 +61,36 @@ EVENTS = {
 }
 
 
+def fit_calibration(samples):
+    """Independent upward intervals (signed encoder counts, measured mm)."""
+    if len(samples) != 3:
+        raise ValueError("낮음·중간·높음 세 구간을 모두 측정하세요")
+    if any(type(n) is not int or n == 0 or not math.isfinite(d)
+           or not 30 <= d <= STROKE_MM for n, d in samples):
+        raise ValueError("각 구간에서 30 mm 이상 올라간 실제 거리를 입력하세요")
+    sign = 1 if samples[0][0] > 0 else -1
+    if any(n * sign <= 0 for n, _ in samples):
+        raise ValueError("상승 방향 카운트가 일치하지 않아요. 배선과 이동 방향을 확인하세요")
+    factors = [d / abs(n) for n, d in samples]
+    if any(not 0 < f <= 1 for f in factors):
+        raise ValueError("거리와 센서 값이 맞지 않아요. 다시 측정하세요")
+    factor = sum(abs(n)*d for n, d in samples) / sum(n*n for n, _ in samples)
+    spread = (max(factors)-min(factors)) / factor
+    # Provisional gross-error gate, not a claim about measurement accuracy.
+    if spread > .05:
+        raise ValueError("구간별 환산값 차이가 5%를 넘어요. 자·측정 기준·엔코더를 확인하고 다시 시작하세요")
+    residual = max(abs(abs(n)*factor-d) for n, d in samples)
+    return factor, sign, spread, residual
+
+
 class PositionUI(Joystick):
     STATUS_PROTOCOL = PROTOCOL
     PWM_MAX = 100
     PWM_DEFAULT = DEFAULT_PWM
-    WINDOW_TITLE = "Lift · 0–630 mm position control"
-    WINDOW_GEOMETRY = "520x760"
+    WINDOW_TITLE = "Lift · 0–690 mm position control"
+    WINDOW_GEOMETRY = "560x880"
     JOYSTICK_SCALE = 0.6
-    HEADING = "리프트 높이 제어 · 0–630 mm"
+    HEADING = "리프트 높이 제어 · 0–690 mm"
     INITIAL_TELEMETRY = "원점 미등록 · 실제 끝단 센서 없음"
 
     def __init__(self, root, port, demo=False):
@@ -122,6 +144,7 @@ class PositionUI(Joystick):
         self.measure_start = self.measure_end = None
         self.measure_phase = "idle"
         self.measure_candidate = None
+        self.measure_samples = []
         self.down_seen = False
         self.calibration_retry = None
         self.zero_deadline = None
@@ -133,14 +156,14 @@ class PositionUI(Joystick):
         self.distance = tk.StringVar(value="")
         self.kp = tk.StringVar(value=str(DEFAULT_KP))
         self.kd = tk.StringVar(value=str(DEFAULT_KD))
-        self.setup_text = tk.StringVar(value="실제 올라간 거리만 입력하면 나머지는 자동으로 설정해요.")
+        self.setup_text = tk.StringVar(value="낮음·중간·높음에서 각각 30 mm 이상 상승량을 측정해요.")
         ttk.Label(panel, text="리프트", font=("TkDefaultFont", 24, "bold")).pack(anchor="w")
         row = ttk.Frame(panel); row.pack(fill="x", pady=8)
         ttk.Label(row, textvariable=self.status, wraplength=340).pack(side="left", expand=True, fill="x")
         ttk.Button(row, text="연결", command=self.connect).pack(side="right")
         self.fault_button = ttk.Button(row, text="오류 해제", command=self.clear_error)
         ttk.Label(panel, textvariable=self.position_text, font=("TkDefaultFont", 20, "bold")).pack(pady=(12, 2))
-        ttk.Label(panel, text="맨 아래 기준 · 총 행정 630 mm · 자동 이동 10–620 mm").pack()
+        ttk.Label(panel, text="맨 아래 기준 · 총 행정 690 mm · 자동 이동 10–680 mm").pack()
         box = ttk.LabelFrame(panel, text="높이 이동", padding=12); box.pack(fill="x", pady=12)
         row = ttk.Frame(box)
         row.pack(fill="x")
@@ -162,15 +185,16 @@ class PositionUI(Joystick):
                                       state="disabled")
         self.zero_button.pack(fill="x", ipady=4)
         ttk.Label(panel, textvariable=self.event_text, wraplength=460).pack(fill="x", pady=8)
-        self.setup_box = ttk.LabelFrame(panel, text="높이 보정 · 최초 1회", padding=10)
+        self.setup_box = ttk.LabelFrame(panel, text="높이 보정 · 세 구간 측정", padding=10)
         self.setup_box.pack(fill="x", pady=4)
-        ttk.Label(self.setup_box, textvariable=self.setup_text, wraplength=440).pack(anchor="w")
+        ttk.Label(self.setup_box, textvariable=self.setup_text, wraplength=490).pack(anchor="w")
         self.distance_row = ttk.Frame(self.setup_box)
         ttk.Label(self.distance_row, text="실제 올라간 거리").pack(side="left")
         ttk.Entry(self.distance_row, textvariable=self.distance, width=8).pack(side="left", padx=6)
         ttk.Label(self.distance_row, text="mm").pack(side="left")
         self.setup_button = ttk.Button(self.setup_box, text="설정 시작", command=self.setup_next)
         self.setup_button.pack(fill="x", pady=(8, 0))
+        ttk.Button(self.setup_box, text="보정 취소 / 처음부터", command=self.cancel_setup).pack(fill="x", pady=(4, 0))
         self.show_details = tk.BooleanVar(value=False)
         ttk.Checkbutton(panel, text="상세 설정", variable=self.show_details,
                         command=self.toggle_details).pack(anchor="w", pady=6)
@@ -196,7 +220,7 @@ class PositionUI(Joystick):
     def toggle_details(self):
         if self.show_details.get():
             self.details.pack(fill="x")
-            self.root.geometry("520x930")
+            self.root.geometry("560x1040")
         else:
             self.details.pack_forget()
             self.root.geometry(self.WINDOW_GEOMETRY)
@@ -251,44 +275,69 @@ class PositionUI(Joystick):
             self.setup_text.set("먼저 정지하세요. 오류가 있으면 상세 설정에서 원인을 확인하고 해제하세요.")
             return
         if self.measure_phase in ("idle", "done"):
+            self.measure_samples = []
+            self.measure_candidate = None
+            self.measure_phase = "ready"
+            self.setup_text.set("1/3 낮은 구간: 하단에서 조금 올라온 곳으로 수동 이동하세요.\n끝단을 피하고, 멈춘 뒤 ‘낮은 구간 측정 시작’을 누르세요.")
+            self.setup_button.configure(text="낮은 구간 측정 시작")
+            self.disarm()
+        elif self.measure_phase == "ready":
             self.disarm()
             self.measure_start = state["raw_count"]
             self.measure_phase = "up"
             self.distance.set("")
             self.distance_row.pack(fill="x", pady=6, before=self.setup_button)
-            self.setup_button.configure(text="거리 입력 완료")
-            self.setup_text.set("① 올리기를 눌러 조금 올린 뒤 놓으세요.\n② 자로 잰 실제 상승 거리를 입력하세요.")
+            self.setup_button.configure(text="이 구간 측정 저장")
+            name = ("낮은", "중간", "높은")[len(self.measure_samples)]
+            self.setup_text.set(f"{len(self.measure_samples)+1}/3 {name} 구간: 시작 위치를 자로 기록하세요.\n위로 30 mm 이상 이동 후 정지하고, 두 위치의 차이를 입력하세요. 끝단은 피하세요.")
         elif self.measure_phase == "up":
             try:
                 distance = float(self.distance.get())
             except ValueError:
                 distance = 0
-            delta = state["raw_count"] - self.measure_start
-            if not math.isfinite(distance) or not 0 < distance <= 630 or delta == 0:
-                self.setup_text.set("실제로 조금 올리고, 자로 잰 상승 거리를 입력하세요.")
+            delta = ((state["raw_count"] - self.measure_start + (1 << 28)) % (1 << 29)) - (1 << 28)
+            if not math.isfinite(distance) or not 30 <= distance <= STROKE_MM or delta == 0:
+                self.setup_text.set("상승 전후 자의 차이(30 mm 이상)를 입력하세요. 현재 높이 전체를 입력하지 마세요.")
                 return
-            factor = distance / abs(delta)
-            if not 0 < factor <= 1:
-                self.setup_text.set("거리와 센서 값이 맞지 않아요. 배선과 측정 거리를 확인하고 다시 설정하세요.")
+            if not 0 < distance / abs(delta) <= 1:
+                self.setup_text.set("거리와 센서 값이 맞지 않아요. 입력값을 확인하세요.")
+                return
+            if self.measure_samples and delta * self.measure_samples[0][0] <= 0:
+                self.setup_text.set("상승 카운트 방향이 앞 구간과 달라요. 이동 방향과 배선을 확인하세요.")
                 return
             self.disarm()
+            self.measure_samples.append((delta, distance))
+            self.distance_row.pack_forget()
+            if len(self.measure_samples) < 3:
+                name = ("중간", "높은")[len(self.measure_samples)-1]
+                self.measure_phase = "ready"
+                self.setup_button.configure(text=f"{name} 구간 측정 시작")
+                self.setup_text.set(f"{len(self.measure_samples)}/3 저장됨 · {distance:g} mm / {abs(delta)} 카운트\n{name} 구간으로 수동 이동 후 정지하고 측정 시작을 누르세요. 구간 사이 이동은 보정에 포함되지 않아요.")
+                return
+            try:
+                factor, sign, spread, residual = fit_calibration(self.measure_samples)
+            except ValueError as error:
+                self.reset_measurement(str(error))
+                return
             self.measure_end = state["raw_count"]
-            self.measure_candidate = (factor, 1 if delta > 0 else -1)
+            self.measure_candidate = (factor, sign)
             self.measure_phase = "down"
             self.down_seen = False
-            self.distance_row.pack_forget()
-            self.setup_button.configure(text="설정 적용")
-            self.setup_text.set("③ 내리기를 짧게 눌렀다가 놓으세요.\n반대 방향도 정상인지 자동으로 확인할게요.")
+            self.setup_button.configure(text="세 구간 보정 적용")
+            self.setup_text.set(f"3/3 완료 · 구간 차이 {spread*100:.2f}% · 최대 거리 잔차 {residual:.2f} mm\n내리기를 짧게 눌렀다 놓고 적용하세요. 잔차는 정확도 보증값이 아니에요.")
         elif self.measure_phase == "down":
             factor, sign = self.measure_candidate
-            reverse = (state["raw_count"] - self.measure_end) * sign
+            reverse = (((state["raw_count"] - self.measure_end + (1 << 28)) % (1 << 29)) - (1 << 28)) * sign
             if not self.down_seen or reverse > -3:
                 self.setup_text.set("내리기를 조금 누른 뒤 놓으세요. 반대 방향 움직임을 확인해야 해요.")
                 return
             self.disarm()
-            if messagebox.askyesno("움직임 확인", "올리기 때 실제로 올라가고, 내리기 때 실제로 내려갔나요?",
+            if messagebox.askyesno("움직임 확인", "세 구간의 실제 상승량을 측정했고, 올리기·내리기 방향도 맞나요?\n적용하면 기존 원점이 해제됩니다.",
                                    default="no", parent=self.root):
                 self.factor.set(str(factor)); self.encoder_sign.set(str(sign))
+                self.record_diagnostic("three_region_calibration", json.dumps({
+                    "samples": self.measure_samples, "mm_per_count": factor,
+                    "encoder_sign": sign}, ensure_ascii=False))
                 self.send("calibrate", mm_per_count=factor, encoder_sign=sign, ab_verified=True)
                 self.calibration_retry = (factor, sign, state["raw_count"], time.monotonic() + 1.2)
                 self.measure_phase = "applying"
@@ -517,10 +566,15 @@ class PositionUI(Joystick):
                                    and state["state"] in ("IDLE", "UNHOMED")
                                    and not state["fault"] else "disabled")
 
-    def reset_measurement(self, text="실제 올라간 거리만 입력하면 나머지는 자동으로 설정해요."):
+    def cancel_setup(self):
+        self.disarm()
+        self.reset_measurement("보정을 취소했어요. 적용 전 측정은 버리고 기존 보정값을 유지해요.")
+
+    def reset_measurement(self, text="낮음·중간·높음에서 각각 30 mm 이상 상승량을 측정해요."):
         self.calibration_retry = None
         self.measure_phase = "idle"
         self.measure_start = self.measure_end = self.measure_candidate = None
+        self.measure_samples = []
         self.down_seen = False
         self.distance_row.pack_forget()
         self.setup_button.configure(text="설정 시작")
@@ -537,7 +591,7 @@ class PositionUI(Joystick):
         except ValueError:
             target = float("nan")
         if not math.isfinite(target) or not WORK_MIN_MM <= target <= WORK_MAX_MM:
-            self.event_text.set("끝단 여유를 위해 목표 높이는 10–620 mm로 입력하세요")
+            self.event_text.set("끝단 여유를 위해 목표 높이는 10–680 mm로 입력하세요")
             return
         if self.latest.get("position_control") != "PD":
             self.event_text.set("PD 위치 제어용 새 Pico 펌웨어를 먼저 올려주세요.")

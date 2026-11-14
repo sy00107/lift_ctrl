@@ -177,7 +177,7 @@ class PositionTests(unittest.TestCase):
 
     def test_endpoint_margin_rejects_without_moving_and_physical_flags_remain(self):
         self.home(); self.cmd("arm")
-        for target in (0, 9.99, 620.01, 630):
+        for target in (0, 9.99, 680.01, 690):
             self.cmd("move_to", target_mm=target)
             self.assertEqual(self.c.event, "target_near_endpoint")
             self.assertIsNone(self.c.target_mm)
@@ -187,10 +187,10 @@ class PositionTests(unittest.TestCase):
         self.simulate_to_rest()
         self.assertEqual(self.c.event, "target_reached")
         self.assertFalse(self.c.status()["at_min"])
-        self.assertEqual(self.c.status()["work_max_mm"], 620)
+        self.assertEqual(self.c.status()["work_max_mm"], 680)
 
     def test_range_invalid_values_and_bool_rejected(self):
-        for target in [-1, 630.01, float("nan"), float("inf"), True, "300"]:
+        for target in [-1, 690.01, float("nan"), float("inf"), True, "300"]:
             with self.subTest(target=target):
                 self.setUp()
                 self.home()
@@ -208,12 +208,39 @@ class PositionTests(unittest.TestCase):
         self.assertEqual(self.outputs[-1], (0, 0))
         self.cmd("jog", direction=1, duty=.2)
         self.assertEqual(self.c.direction, 1)
-        self.step(counts=6300)
+        self.step(counts=6900)
         self.assertEqual(self.c.event, "soft_max")
         self.cmd("jog", direction=1, duty=.2)
         self.assertEqual(self.c.direction, 0)
         self.cmd("jog", direction=-1, duty=.2)
         self.assertEqual(self.c.direction, -1)
+
+    def test_lower_limit_stops_normally_before_no_pulse_fault(self):
+        self.home()
+        self.step(counts=120)  # 12 mm, just outside the lower margin.
+        self.cmd("arm")
+        self.cmd("jog", direction=-1, duty=.2)
+        self.raw -= 10  # Last physical movement reached the 11 mm boundary.
+        self.c.no_pulse_drive_ms = fw.NO_PULSE_MS
+        self.step()
+        self.assertEqual(self.c.event, "soft_min")
+        self.assertEqual(self.c.fault, "")
+        self.assertTrue(self.c.homed)
+        self.assertEqual(self.outputs[-1], (0, 0))
+        for _ in range(3):
+            self.cmd("jog", direction=-1, duty=.2)
+            self.assertEqual(self.c.fault, "")
+            self.assertEqual(self.outputs[-1], (0, 0))
+        self.c.reset_velocity()
+        self.cmd("jog", direction=1, duty=.2)
+        self.assertEqual(self.c.direction, 1)
+
+    def test_680_mm_target_is_accepted(self):
+        self.home()
+        self.cmd("arm")
+        self.cmd("move_to", target_mm=680)
+        self.assertEqual(self.c.target_mm, 680)
+        self.assertEqual(self.c.fault, "")
 
     def test_midstroke_stall_is_fault_never_min_max_or_zero(self):
         self.home()
@@ -259,7 +286,7 @@ class PositionTests(unittest.TestCase):
         self.home()
         self.step(counts=1000)
         self.assertEqual(self.c.position_mm, 100)
-        self.step(counts=5520)
+        self.step(counts=6120)
         self.assertEqual(self.c.fault, "position_out_of_range")
         self.assertFalse(self.c.homed)
 
@@ -601,6 +628,15 @@ class PositionTests(unittest.TestCase):
 
 
 class CalibrationStorageTests(unittest.TestCase):
+    def test_original_stroke_metadata_keeps_same_encoder_scale(self):
+        store = fw.CalibrationStore(device_id="pico-a")
+        legacy = store.record(.21574344, 1)
+        legacy["stroke_mm"] = 630.0
+        migrated = store.validate(legacy)
+        self.assertEqual(migrated["stroke_mm"], 690.0)
+        self.assertEqual(migrated["mm_per_count"], .21574344)
+        self.assertEqual(migrated["encoder_sign"], 1)
+
     def test_atomic_save_keeps_previous_file_on_interruption_and_skips_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "calibration.json")
@@ -715,7 +751,7 @@ class PositionGuiTests(unittest.TestCase):
 
     def test_invalid_target_is_not_transmitted_and_stale_transport_clears_position(self):
         self.arm_and_home()
-        for value in ["631", "-1", "nan", "abc"]:
+        for value in ["691", "-1", "nan", "abc"]:
             self.app.target.set(value)
             self.app.move_to()
             self.assertEqual(self.commands(), [])
@@ -794,29 +830,64 @@ class PositionGuiTests(unittest.TestCase):
         self.app.tick_extra()
         self.assertNotIn("move_to", [cmd["cmd"] for cmd in self.commands()])
 
+    def test_three_region_fit_and_rejection(self):
+        from lift_position import fit_calibration
+        factor, sign, spread, residual = fit_calibration([(300,60), (500,100), (700,140)])
+        self.assertAlmostEqual(factor, .2)
+        self.assertEqual(sign, 1)
+        self.assertAlmostEqual(spread, 0)
+        self.assertAlmostEqual(residual, 0)
+        self.assertEqual(fit_calibration([(-300,60),(-500,100),(-700,140)])[1], -1)
+        for samples in ([(500,100)], [(500,100),(500,100),(500,130)],
+                        [(500,100),(-500,100),(500,100)],
+                        [(500,100),(500,float("nan")),(500,100)],
+                        [(10,2),(500,100),(500,100)]):
+            with self.subTest(samples=samples), self.assertRaises(ValueError):
+                fit_calibration(samples)
+
+    def test_partial_samples_do_not_apply_and_cancel_discards_them(self):
+        self.receive(calibrated=True, raw_count=2)
+        self.app.setup_next()
+        self.commands()
+        self.app.setup_next()
+        self.commands()
+        self.receive(calibrated=True, raw_count=502)
+        self.app.distance.set("100")
+        self.app.setup_next()
+        self.assertNotIn("calibrate", [x["cmd"] for x in self.commands()])
+        self.assertEqual(len(self.app.measure_samples), 1)
+        self.app.cancel_setup()
+        self.assertEqual(self.app.measure_samples, [])
+        self.assertEqual(self.app.measure_phase, "idle")
+        self.assertNotIn("calibrate", [x["cmd"] for x in self.commands()])
+
     def test_wizard_records_counts_and_checks_both_directions(self):
         self.receive(calibrated=False, raw_count=2)
         self.app.setup_next()
         self.commands()
-        self.receive(calibrated=False, raw_count=502)
-        self.app.distance.set("100")
-        self.app.setup_next()
-        self.commands()
+        for start in (2, 1002, 2002):
+            self.receive(calibrated=False, raw_count=start)
+            self.app.setup_next()
+            self.commands()
+            self.receive(calibrated=False, raw_count=start+500)
+            self.app.distance.set("100")
+            self.app.setup_next()
+            self.commands()
         self.assertEqual(self.app.measure_phase, "down")
         self.app.start_manual(-1)
         self.commands()
-        self.receive(calibrated=False, raw_count=602, armed=True)
+        self.receive(calibrated=False, raw_count=2602, armed=True)
         self.app.release()
         self.commands()
-        self.receive(calibrated=False, raw_count=602)
+        self.receive(calibrated=False, raw_count=2602)
         self.app.setup_next()
         self.assertNotIn("calibrate", [cmd["cmd"] for cmd in self.commands()])
-        self.receive(calibrated=False, raw_count=402)
+        self.receive(calibrated=False, raw_count=2402)
         with patch("lift_position.messagebox.askyesno", return_value=True):
             self.app.setup_next()
         self.assertEqual(self.commands()[-1], {"cmd": "calibrate", "mm_per_count": .2,
                                                "encoder_sign": 1, "ab_verified": True})
-        self.receive(calibrated=True, raw_count=402, event="calibrated_unhomed")
+        self.receive(calibrated=True, raw_count=2402, event="calibrated_unhomed")
         self.assertEqual(self.app.measure_phase, "done")
         self.assertIn("설정 완료", self.app.setup_text.get())
 
@@ -868,7 +939,11 @@ class PositionGuiTests(unittest.TestCase):
         self.app.key_release(key("Down"))
         self.root.after(65, self.root.quit); self.root.mainloop()
         self.assertFalse(self.app.held)
-        self.assertEqual(self.commands()[-1], {"cmd": "stop"})
+        # Periodic heartbeat may follow stop; it must never restart jogging.
+        commands = self.commands()
+        self.assertIn({"cmd": "stop"}, commands)
+        after_stop = commands[commands.index({"cmd": "stop"})+1:]
+        self.assertFalse(any(item["cmd"] == "jog" for item in after_stop))
 
     def test_reboot_and_repeat_cannot_restart_held_keyboard(self):
         key = types.SimpleNamespace(keysym="Up", widget=self.app.canvas)

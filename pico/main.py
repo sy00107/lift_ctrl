@@ -1,4 +1,4 @@
-"""MicroPython lift position control. Manual zero; encoder soft limits 0..630 mm.
+"""MicroPython lift position control. Manual zero; encoder soft limits 0..690 mm.
 
 This is a separate firmware/protocol from the existing jog/PWM versions.
 No physical end-stop sensors are assumed. Never home by driving into a stall.
@@ -20,7 +20,7 @@ MM_PER_COUNT = None
 ENCODER_SIGN = 1
 ENCODER_AB_VERIFIED = False
 PROTOCOL = "yor-lift-position-v1"
-STROKE_MM = 630.0
+STROKE_MM = 690.0
 MAX_DUTY = 1.0
 MIN_POSITION_DUTY = 0.10
 # Provisional breakaway compensation; measure the real lift before tuning further.
@@ -99,7 +99,7 @@ class CalibrationStore:
                 or data.get("device_id") != self.device_id
                 or data.get("decoder") != "a_rising_b_x1"
                 or data.get("encoder_pins") != [ENC_A_PIN, ENC_B_PIN]
-                or data.get("stroke_mm") != STROKE_MM
+                or data.get("stroke_mm") not in (630.0, STROKE_MM)
                 or not number(data.get("mm_per_count")) or not 0 < data["mm_per_count"] <= 1
                 or type(data.get("encoder_sign")) is not int or data["encoder_sign"] not in (-1, 1)
                 or data.get("ab_verified") is not True):
@@ -340,6 +340,14 @@ class PositionController:
         if utime.ticks_diff(now, self.started) >= MOVE_TIMEOUT_MS:
             self.fail("move_timeout")
             return
+        # Known encoder boundary is a normal directional stop, even when the
+        # last powered interval also reaches the no-pulse timeout. Unknown
+        # position and mid-stroke stalls still invalidate the reference.
+        if self.mode == "jog" and pos is not None:
+            if ((self.jog_direction < 0 and pos <= WORK_MARGIN_MM + END_TOLERANCE_MM)
+                    or (self.jog_direction > 0 and pos >= STROKE_MM - WORK_MARGIN_MM - END_TOLERANCE_MM)):
+                self.stop("soft_min" if self.jog_direction < 0 else "soft_max")
+                return
         if self.direction:
             if self.calibrated:
                 self.wrong_distance = (self.wrong_distance + abs(distance)
@@ -370,11 +378,7 @@ class PositionController:
                         return
                     self.reset_progress(self.progress_direction)
         if self.mode == "jog":
-            if pos is not None and ((self.jog_direction < 0 and pos <= WORK_MARGIN_MM + END_TOLERANCE_MM)
-                                    or (self.jog_direction > 0 and pos >= STROKE_MM - WORK_MARGIN_MM - END_TOLERANCE_MM)):
-                self.stop("soft_min" if self.jog_direction < 0 else "soft_max")
-            else:
-                self.output_jog(pos)
+            self.output_jog(pos)
             return
         if self.mode == "settling":
             if abs(self.target_mm - pos) > TOLERANCE_MM + POSITION_EPSILON_MM:

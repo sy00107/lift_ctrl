@@ -94,9 +94,9 @@ class Simulator:
         self.v+=(velocity_target-self.v)*(1-math.exp(-DT/tau))
         if p.injection=='jam' and active:self.v=0.
         next_x=self.x+self.v*DT
-        if next_x<0 or next_x>630:
+        if next_x<0 or next_x>690:
             self.contact=True
-            next_x=min(630.,max(0.,next_x));self.v=0.
+            next_x=min(690.,max(0.,next_x));self.v=0.
         self.x=next_x
         self.peak_speed=max(self.peak_speed,abs(self.v))
         raw=round(self.x/p.resolution)
@@ -156,7 +156,7 @@ def main():
     plants=[Plant(),Plant('light_fast',0,1,.035,.06,.03,0,.05),
         Plant('loaded',1,.9,.085,.25,.1,50,.2,down_gain=1.12),
         Plant('high_inertia',.75,.95,.07,.35,.15,80,.2,down_gain=1.1)]
-    moves=[(0,10,.25),(0,100,.6),(0,620,1.),(620,10,1.),(300,200,.25),(200,300,1.)]
+    moves=[(0,10,.25),(0,100,.6),(0,680,1.),(680,10,1.),(300,200,.25),(200,300,1.)]
     gains=[(kp,kd) for kp in [.002,.003,.004,.006,.008,.01,.015,.02,.03,.04,.05,.06,.08,.1]
         for kd in [0,.0005,.001,.002,.003,.005,.006,.008,.01,.015,.02,.025,.03,.04,.06,.08]]
     jobs=[(p,kp,kd,*move) for kp,kd in gains for p in plants for move in moves]
@@ -179,7 +179,7 @@ def main():
         resolution=rng.choice([.05,.1,.2,.4]),down_gain=rng.uniform(.9,1.15)) for i in range(240)]
     held_jobs=[]
     for p in held_plants:
-        for start,target in [(0,rng.choice([10,20,100,300,620])),(630,rng.choice([10,100,300,600,620]))]:
+        for start,target in [(0,rng.choice([10,20,100,300,680])),(690,rng.choice([10,100,300,600,680]))]:
             held_jobs.append((p,kp,kd,start,target,rng.choice([.25,.4,.6,.8,1.])))
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         held=list(pool.map(trial,held_jobs,chunksize=8))
@@ -187,7 +187,7 @@ def main():
     for p in plants:
         cycle_sim=Simulator(p,trace=True)
         for cycle in range(20):
-            for target in [200,300,620,400,100,10]:
+            for target in [200,300,680,400,100,10]:
                 r=cycle_sim.move(target,kp,kd,1.)
                 cycles.append(dict(model=p.name,cycle=cycle+1,**r))
                 if cycle_sim.c.fault:break
@@ -196,7 +196,7 @@ def main():
     duty_tests=[]
     for p in plants[:3]:
         for duty in [.1,.15,.2,.25,.5,1.]:
-            for start,target in [(0,620),(630,10)]:
+            for start,target in [(0,680),(690,10)]:
                 duty_tests.append(trial((p,kp,kd,start,target,duty)))
     stress=[];stress_traces=[]
     stress_plants=[Plant('high_static_friction',friction=.18,load_fraction=1),
@@ -210,14 +210,14 @@ def main():
         Plant('calibration_minus_3pct_at_top',scale_error=-.03)]
     for p in stress_plants:
         sim=Simulator(p,start=100,trace=True)
-        r=sim.move(620 if p.name.endswith('_at_top') else 500,kp,kd,1.,hold=5.)
+        r=sim.move(680 if p.name.endswith('_at_top') else 500,kp,kd,1.,hold=5.)
         r['output_off_after_test']=sim.duty==0
         r['homed_after_test']=sim.c.homed
         stress.append(dict(model=p.name,**r));stress_traces.extend(dict(model=p.name,**t) for t in sim.trace)
     representative=[];traces=[]
     for label,pg,pd in [('existing',.006,.001),('P_only',kp,0.),('selected',kp,kd)]:
         sim=Simulator(Plant(),trace=True)
-        for target in [200,300,620,300,10]:
+        for target in [200,300,680,300,10]:
             r=sim.move(target,pg,pd,1.)
             representative.append(dict(controller=label,**r))
             if sim.c.fault:break
@@ -237,7 +237,7 @@ def main():
         stress=stress,training_plants=[asdict(p) for p in plants],
         heldout_plants=[asdict(p) for p in held_plants],
         elapsed_s=time.time()-began,firmware_sha256=hashlib.sha256((ROOT/'pico/main.py').read_bytes()).hexdigest(),
-        specs=dict(stroke_mm=630,max_speed_mm_s=38.1,dual_column_desk_capacity_kg=125),
+        specs=dict(stroke_mm=690,max_speed_mm_s=38.1,dual_column_desk_capacity_kg=125),
         limitations=['Assumed plant, not identified from real motor data','125 kg is the complete two-motor desk rating',
             'No current, force, temperature, structural, dual-column synchronization or real-time HAL validation',
             'Encoder resolution, load response, friction, latency and self locking are assumptions',

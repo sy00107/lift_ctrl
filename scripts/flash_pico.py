@@ -12,7 +12,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT_PATTERN = '/dev/serial/by-id/usb-MicroPython_Board_in_FS_mode_*-if00'
-EXTEND_WATCHDOG = 'import machine; machine.WDT(timeout=8000).feed()'
+EXTEND_WATCHDOG = 'import machine; _w = machine.WDT(timeout=8000); _w.feed()'
+# Each file copy is a separate step; feed between them so the 8 s limit never expires.
+FEED = ['+', 'exec', '_w.feed()']
 
 
 def find_port(explicit):
@@ -50,7 +52,16 @@ def main():
                                    dir=str(args.backup_dir.resolve())))
     print('Backup:', backup, flush=True)
     # Raise the existing watchdog only while performing the verified replacement.
-    probe = remote('exec', EXTEND_WATCHDOG + '; import os,json; print(json.dumps(os.listdir()))')
+    probe = None
+    for attempt in range(8):  # The 1 s firmware watchdog can reset the Pico mid-connect.
+        try:
+            probe = remote('exec', EXTEND_WATCHDOG + '; import os,json; print(json.dumps(os.listdir()))')
+            break
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            import time
+            time.sleep(3)
+    if probe is None:
+        raise RuntimeError('Could not reach the Pico; active firmware was not replaced')
     files = None
     for line in probe.splitlines():
         try:
@@ -64,9 +75,9 @@ def main():
     parts = ['exec', EXTEND_WATCHDOG]
     for name in ('main.py', 'lift_calibration.json'):
         if name in files:
-            parts += ['+', 'fs', 'cp', ':' + name, str(backup/name)]
-    parts += ['+', 'fs', 'cp', str(firmware), ':main.next.py',
-              '+', 'fs', 'cp', ':main.next.py', str(backup/'candidate-verify.py')]
+            parts += ['+', 'fs', 'cp', ':' + name, str(backup/name)] + FEED
+    parts += ['+', 'fs', 'cp', str(firmware), ':main.next.py'] + FEED
+    parts += ['+', 'fs', 'cp', ':main.next.py', str(backup/'candidate-verify.py')]
     remote(*parts)
     if (backup/'candidate-verify.py').read_bytes() != firmware.read_bytes():
         raise RuntimeError('Upload readback differs; active main.py was not replaced')
